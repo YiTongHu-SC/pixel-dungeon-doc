@@ -51,8 +51,13 @@
 4. `items/Item.java` 与 `Generator.java` —— 熟悉物品架构。
 5. `scenes/GameScene.java`, `ui/` —— 查看 UI 组合方式。
 
-## 9. 后续扩展建议
+## 9. 详细文档
 
-- 按模块建立更细的笔记（例如关卡生成流程、Buff/Blob 生命周期）。
-- 补全中文注释或 UML 草图，帮助快速定位关键类。
+- **[关卡生成流程](level-generation.md)** - Mermaid 流程图展示地城生成的完整过程
+- **[UML 架构草图](uml-architecture.md)** - 核心类图与设计模式分析
+
+## 10. 后续扩展建议
+
+- 按模块建立更细的笔记（例如 Buff/Blob 生命周期、战斗计算公式）。
+- 补充具体子系统的序列图，展示方法调用链。
 - 若需调试可视化，可先在 `GameScene` 中添加日志，再深入具体子系统。
