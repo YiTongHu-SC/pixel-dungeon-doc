@@ -11,3 +11,5 @@ agent: agent
 
 - source
   源码路径: src/
+  生成文档路径： docs/
+  生成文档语言: Chinese
