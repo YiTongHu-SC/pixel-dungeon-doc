@@ -55,6 +55,7 @@
 
 - **[关卡生成流程](level-generation.md)** - Mermaid 流程图展示地城生成的完整过程
 - **[UML 架构草图](uml-architecture.md)** - 核心类图与设计模式分析
+- **[地牢生成算法](dungeon-generation-algorithm.md)** - BSP 分割与连通性算法详解
 
 ## 10. 后续扩展建议
 
