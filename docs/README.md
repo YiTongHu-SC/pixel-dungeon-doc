@@ -57,6 +57,7 @@
 - **[UML 架构草图](uml-architecture.md)** - 核心类图与设计模式分析
 - **[地牢生成算法](dungeon-generation-algorithm.md)** - BSP 分割与连通性算法详解
 - **[回合制游戏机制](turn-based-gameplay.md)** - Actor 时间调度与 AI 状态机分析
+- **[视野与可见性系统](field-of-view-system.md)** - ShadowCaster 算法与 FOV 渲染机制
 
 ## 10. 后续扩展建议
 
