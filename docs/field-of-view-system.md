@@ -31,110 +31,595 @@ flowchart TD
     R --> T["渲染迷雾效果"]
 ```
 
-## 1. ShadowCaster 算法
+## 1. ShadowCaster 算法深度解析
 
-### 1.1 核心原理
+### 1.1 算法概述
 
-`ShadowCaster` 使用扇形投射算法（Sector-based Shadow Casting）计算视野。算法将视野分为8个八分圆（octant），从观察者位置向外逐行扫描，追踪遮挡物产生的"阴影扇形"。
+`ShadowCaster` 实现了经典的 **扇形投射视野算法**（Sector-based Shadow Casting），这是 Roguelike 游戏中最精确的 FOV 算法之一。
+
+**核心思想：**
+
+- 将视野划分为 **8 个八分圆**（octant），每个八分圆使用不同的坐标变换
+- 从观察者位置向外 **逐行扫描**，追踪遮挡物产生的 **角度阴影**
+- 使用 **三点采样** 判断单元格是否被完全阻挡
 
 **关键特性：**
 
 - **最大视距**: `MAX_DISTANCE = 8` 个单元格
-- **预计算表**: 使用 `rounding[]` 数组优化圆形边界判定
-- **精确碰撞**: 每个遮挡物生成角度范围，阻挡后续光线
+- **预计算表**: `rounding[][]` 二维数组存储圆形边界
+- **角度区间**: 使用浮点数精确追踪阴影扇形
+- **逐行合并**: 相邻障碍物自动合并为连续阴影
 
-### 1.2 算法实现
+### 1.2 静态初始化与预计算
+
+#### 1.2.1 预计算圆形边界表
 
 ```java
-public class ShadowCaster {
-    private static final int MAX_DISTANCE = 8;
+private static int[][] rounding;
+static {
+    rounding = new int[MAX_DISTANCE+1][];  // 9 行 (距离 0-8)
     
-    // 预计算的圆形边界表 (Bresenham圆算法)
-    private static int[] rounding;
-    
-    static {
-        rounding = new int[MAX_DISTANCE + 1];
-        for (int i=1; i <= MAX_DISTANCE; i++) {
-            rounding[i] = (int)Math.round( Math.sqrt( MAX_DISTANCE * MAX_DISTANCE - i * i ) );
-        }
-    }
-    
-    public static void castShadow( int x, int y, boolean[] fieldOfView, int mapWidth ) {
-        // 观察者位置始终可见
-        fieldOfView[y * mapWidth + x] = true;
+    for (int i=1; i <= MAX_DISTANCE; i++) {
+        rounding[i] = new int[i+1];  // 每行长度递增
         
-        // 扫描8个八分圆方向
-        for (int dir=0; dir < 8; dir++) {
-            scanSector( x, y, fieldOfView, mapWidth, dir );
+        for (int j=1; j <= i; j++) {
+            // 使用反正弦函数计算圆形边界
+            rounding[i][j] = (int)Math.min( j, 
+                Math.round( i * Math.cos( Math.asin( j / (i + 0.5) ))));
         }
     }
 }
 ```
 
-### 1.3 扇形扫描
+**数学原理：**
 
-每个八分圆使用 `Obstacles` 对象追踪阻挡角度：
+``` text
+在半径为 r 的圆上，给定 y 坐标，计算 x 坐标:
+
+圆方程: x² + y² = r²
+解得:   x = √(r² - y²)
+
+代码使用三角函数等价形式:
+1. sin(θ) = y / (r + 0.5)     [+0.5 用于反走样]
+2. θ = asin(y / (r + 0.5))
+3. x = r * cos(θ)
+```
+
+**预计算表示例 (MAX_DISTANCE = 8):**
+
+| 距离 i | j=1 | j=2 | j=3 | j=4 | j=5 | j=6 | j=7 | j=8 |
+|--------|-----|-----|-----|-----|-----|-----|-----|-----|
+| 1 | 1 | - | - | - | - | - | - | - |
+| 2 | 2 | 1 | - | - | - | - | - | - |
+| 3 | 3 | 3 | 2 | - | - | - | - | - |
+| 4 | 4 | 4 | 3 | 2 | - | - | - | - |
+| 5 | 5 | 5 | 4 | 4 | 3 | - | - | - |
+| 6 | 6 | 6 | 5 | 5 | 4 | 3 | - | - |
+| 7 | 7 | 7 | 6 | 6 | 5 | 5 | 4 | - |
+| 8 | 8 | 8 | 7 | 7 | 6 | 6 | 5 | 4 |
+
+**解读:** `rounding[5][3] = 4` 表示距离 5 时，纵坐标 3 对应的横坐标约为 4。
+
+#### 1.2.2 八分圆坐标变换
 
 ```java
-private static void scanSector( int cx, int cy, boolean[] fieldOfView, int mapWidth, int sector ) {
-    Obstacles obs = new Obstacles();
-    obs.limits[0] = 0;
-    obs.nLimits = 1;
+public static void castShadow( int x, int y, boolean[] fieldOfView, int distance ) {
+    losBlocking = Level.losBlocking;  // 障碍物数组
+    ShadowCaster.distance = distance;
+    limits = rounding[distance];      // 选择对应距离的边界表
     
-    // 从近到远逐行扫描
-    for (int row=1; row <= MAX_DISTANCE && obs.nLimits > 0; row++) {
-        int width = rounding[row];  // 该行的宽度
+    ShadowCaster.fieldOfView = fieldOfView;
+    Arrays.fill( fieldOfView, false );
+    fieldOfView[y * WIDTH + x] = true;  // 观察者位置可见
+    
+    // 8 个八分圆，使用不同的坐标变换矩阵
+    scanSector( x, y, +1, +1, 0, 0 );  // 第 1 象限，右上 (0°-45°)
+    scanSector( x, y, -1, +1, 0, 0 );  // 第 2 象限，左上
+    scanSector( x, y, +1, -1, 0, 0 );  // 第 4 象限，右下
+    scanSector( x, y, -1, -1, 0, 0 );  // 第 3 象限，左下
+    scanSector( x, y, 0, 0, +1, +1 );  // 第 1 象限，右上 (45°-90°)
+    scanSector( x, y, 0, 0, -1, +1 );  // 第 2 象限，左上
+    scanSector( x, y, 0, 0, +1, -1 );  // 第 4 象限，右下
+    scanSector( x, y, 0, 0, -1, -1 );  // 第 3 象限，左下
+}
+```
+
+**坐标变换矩阵:**
+
+| 八分圆 | m1 | m2 | m3 | m4 | 角度范围 | 说明 |
+|--------|----|----|----|----|---------|------|
+| 1 | +1 | +1 | 0 | 0 | 0°-45° | 右上，x 主轴 |
+| 2 | 0 | 0 | +1 | +1 | 45°-90° | 右上，y 主轴 |
+| 3 | 0 | 0 | -1 | +1 | 90°-135° | 左上，y 主轴 |
+| 4 | -1 | +1 | 0 | 0 | 135°-180° | 左上，x 主轴 |
+| 5 | -1 | -1 | 0 | 0 | 180°-225° | 左下，x 主轴 |
+| 6 | 0 | 0 | -1 | -1 | 225°-270° | 左下，y 主轴 |
+| 7 | 0 | 0 | +1 | -1 | 270°-315° | 右下，y 主轴 |
+| 8 | +1 | -1 | 0 | 0 | 315°-360° | 右下，x 主轴 |
+
+### 1.3 扇形扫描核心算法
+
+#### 1.3.1 scanSector 方法详解
+
+```java
+private static void scanSector( int cx, int cy, int m1, int m2, int m3, int m4 ) {
+    
+    obs.reset();  // 重置障碍物追踪器
+    
+    // 从距离 1 逐步扫描到最大距离
+    for (int p=1; p <= distance; p++) {
+
+        // dq2 = 单元格的半角度宽度
+        float dq2 = 0.5f / p;
         
-        for (int col=-width; col <= width; col++) {
-            // 计算实际坐标
-            Point cell = new Point(cx, cy);
-            Point.toShadowCast( cell, col, row, sector );
+        // pp = 当前距离下的最大横坐标
+        int pp = limits[p];  // limits = rounding[distance]
+        
+        // 遍历当前行的所有单元格
+        for (int q=0; q <= pp; q++) {
             
-            if (cell.x >= 0 && cell.x < mapWidth && ...) {
-                float f0 = (float)col / (row + 2);  // 起始角度
-                float f1 = (float)(col + 1) / (row + 1);  // 结束角度
+            // 坐标变换: (p, q) → (x, y)
+            int x = cx + q * m1 + p * m3;
+            int y = cy + p * m2 + q * m4;
+            
+            // 边界检查
+            if (y >= 0 && y < HEIGHT && x >= 0 && x < WIDTH) {
                 
-                if (obs.isBlocked( f0, f1 )) {
-                    continue;  // 被阻挡，跳过
+                // 计算单元格的角度范围
+                float a0 = (float)q / p;      // 中心角度
+                float a1 = a0 - dq2;          // 左边界角度
+                float a2 = a0 + dq2;          // 右边界角度
+                
+                int pos = y * WIDTH + x;
+                
+                // 三点采样检测: 检查中心、左边界、右边界
+                if (obs.isBlocked( a0 ) && obs.isBlocked( a1 ) && obs.isBlocked( a2 )) {
+                    // 完全被阻挡，跳过 (不设置可见)
+                } else {
+                    // 至少部分可见
+                    fieldOfView[pos] = true;
                 }
                 
-                // 单元格可见
-                fieldOfView[cell.y * mapWidth + cell.x] = true;
-                
-                // 如果是障碍物，添加到阻挡列表
-                if (isOpaque( cell )) {
-                    obs.add( f0, f1 );
+                // 如果是障碍物，添加到阴影区间
+                if (losBlocking[pos]) {
+                    obs.add( a1, a2 );
                 }
             }
         }
+        
+        // 切换到下一行 (将当前行的障碍物设为生效)
+        obs.nextRow();
     }
 }
 ```
 
-### 1.4 Obstacles 类
+#### 1.3.2 坐标变换详解
 
-使用合并排序的角度区间追踪阻挡：
+**示例: 第 1 八分圆 (m1=+1, m2=+1, m3=0, m4=0)**
+
+```
+观察者位置: (cx=10, cy=10)
+距离 p=3, 横坐标 q=2
+
+计算:
+x = cx + q * m1 + p * m3 = 10 + 2*1 + 3*0 = 12
+y = cy + p * m2 + q * m4 = 10 + 3*1 + 2*0 = 13
+
+结果: 单元格 (12, 13)
+```
+
+**可视化扫描顺序:**
+
+```
+       第 1 八分圆 (m1=+1, m2=+1, m3=0, m4=0)
+       
+       y
+       ↑
+     4 │     ●
+     3 │   ● ● ●
+     2 │  ● ● ● ●
+     1 │ ● ● ● ● ●
+     0 │ @ ─────────→ x
+       0 1 2 3 4
+       
+ @ = 观察者
+ ● = 扫描单元格
+ 
+ 扫描顺序 (p, q):
+ p=1: (1,0) (1,1)
+ p=2: (2,0) (2,1) (2,2)
+ p=3: (3,0) (3,1) (3,2) (3,3)
+ p=4: (4,0) (4,1) (4,2) (4,3) (4,4)
+```
+
+#### 1.3.3 角度计算与三点采样
+
+**角度坐标系:**
+
+```
+        a=1.0 (45°)
+           ╱│
+          ╱ │
+         ╱  │
+        ╱   │
+       ╱    │
+    观察者 ──→ a=0.0 (0°)
+```
+
+**单元格角度计算:**
 
 ```java
-private static class Obstacles {
-    float[] limits = new float[MAX_DISTANCE * MAX_DISTANCE];
-    int nLimits = 0;
+float a0 = (float)q / p;      // 中心角度 = tan(θ) = 对边/邻边
+float dq2 = 0.5f / p;         // 半角度宽度
+float a1 = a0 - dq2;          // 左边界
+float a2 = a0 + dq2;          // 右边界
+```
+
+**示例: p=4, q=2**
+
+```
+a0 = 2/4 = 0.5
+dq2 = 0.5/4 = 0.125
+a1 = 0.5 - 0.125 = 0.375
+a2 = 0.5 + 0.125 = 0.625
+
+视觉表示:
+      a=0.625 ╱│
+            ╱  │ ← 单元格覆盖的角度范围
+      a=0.5 ╱   │
+          ╱     │
+    a=0.375 ─────
+```
+
+**三点采样原理:**
+
+```java
+if (obs.isBlocked( a0 ) && obs.isBlocked( a1 ) && obs.isBlocked( a2 )) {
+    // 完全阻挡: 中心、左、右都被遮挡
+} else {
+    // 部分或完全可见
+    fieldOfView[pos] = true;
+}
+```
+
+**为什么需要三点？**
+
+```
+场景: 单元格部分被阴影覆盖
+
+阴影区间: [0.4, 0.55]
+单元格: a1=0.375, a0=0.5, a2=0.625
+
+检测结果:
+- isBlocked(a1=0.375) = false  (左边界在阴影外)
+- isBlocked(a0=0.5)   = true   (中心在阴影内)
+- isBlocked(a2=0.625) = false  (右边界在阴影外)
+
+结论: 至少一个点可见 → 单元格可见 (部分可见也算可见)
+```
+
+### 1.4 Obstacles 类详解
+
+#### 1.4.1 数据结构
+
+```java
+private static final class Obstacles {
     
-    // 检查角度范围是否被完全阻挡
-    boolean isBlocked( float f0, float f1 ) {
-        for (int i=0; i < nLimits; i += 2) {
-            if (limits[i] <= f0 && limits[i+1] >= f1) {
-                return true;  // 完全在某个阴影扇形内
-            }
-        }
-        return false;
-    }
+    // 预分配最大容量: (8+1)*(8+1)/2 = 40.5 ≈ 41
+    private static int SIZE = (MAX_DISTANCE+1) * (MAX_DISTANCE+1) / 2;
+    private static float[] a1 = new float[SIZE];  // 左边界数组
+    private static float[] a2 = new float[SIZE];  // 右边界数组
     
-    // 添加新的阻挡区间，自动合并重叠部分
-    void add( float f0, float f1 ) {
-        // ... 插入排序并合并相邻区间
+    private int length;  // 当前行的障碍物数量
+    private int limit;   // 上一行的障碍物数量 (已生效)
+    
+    // ...
+}
+```
+
+**为什么是三角形数 SIZE?**
+
+```
+最坏情况: 每个单元格都是障碍物，且不合并
+
+距离 1: 最多 1 个障碍物
+距离 2: 最多 2 个
+距离 3: 最多 3 个
+...
+距离 8: 最多 8 个
+
+总数 = 1+2+3+...+8 = 8*(8+1)/2 = 36
+加上安全余量 → SIZE = 41
+```
+
+#### 1.4.2 核心方法
+
+**reset() - 重置障碍物追踪器**
+
+```java
+public void reset() {
+    length = 0;  // 当前行无障碍物
+    limit = 0;   // 无生效的障碍物
+}
+```
+
+**add() - 添加障碍物区间（自动合并）**
+
+```java
+public void add( float o1, float o2 ) {
+    
+    // 情况 1: 与上一个区间相邻或重叠 → 合并
+    if (length > limit && o1 <= a2[length-1]) {
+        
+        // 扩展上一个区间的右边界
+        a2[length-1] = o2;
+        
+    } else {
+        // 情况 2: 独立区间 → 新增
+        a1[length] = o1;
+        a2[length++] = o2;
     }
 }
+```
+
+**合并示例:**
+
+```
+已有区间: [0.2, 0.4]
+新增区间: [0.35, 0.6]
+
+检查: o1=0.35 <= a2[0]=0.4  → 重叠
+合并: a2[0] = 0.6
+
+结果: [0.2, 0.6]
+```
+
+**isBlocked() - 检查角度是否被阻挡**
+
+```java
+public boolean isBlocked( float a ) {
+    for (int i=0; i < limit; i++) {  // 只检查已生效的障碍物
+        if (a >= a1[i] && a <= a2[i]) {
+            return true;  // 在某个阴影区间内
+        }
+    }
+    return false;
+}
+```
+
+**nextRow() - 切换到下一行**
+
+```java
+public void nextRow() {
+    limit = length;  // 当前行的障碍物设为生效
+}
+```
+
+**为什么分 `length` 和 `limit`？**
+
+```
+原因: 障碍物只阻挡更远的单元格，不阻挡同一行
+
+示例:
+距离 p=2 的障碍物:
+- 在 p=2 时: 添加到 a1[], a2[]，但 limit 不变
+- 在 p=3 时: nextRow() 后，limit=length，开始阻挡
+
+时序:
+p=1: length=0, limit=0  → 添加障碍物 → length=1, limit=0
+p=2: nextRow() → limit=1  → p=1 的障碍物生效
+     添加新障碍物 → length=2, limit=1
+p=3: nextRow() → limit=2  → p=2 的障碍物生效
+```
+
+### 1.5 完整算法流程图
+
+```mermaid
+flowchart TD
+    A[castShadow 开始] --> B[初始化 fieldOfView 全为 false]
+    B --> C[设置观察者位置为 true]
+    C --> D{遍历 8 个八分圆}
+    
+    D --> E[scanSector 扫描扇形]
+    E --> F[obs.reset 重置障碍物]
+    
+    F --> G{遍历距离 p=1 到 MAX_DISTANCE}
+    G --> H[计算 dq2 = 0.5/p]
+    H --> I[获取 pp = limits<p>]
+    
+    I --> J{遍历横坐标 q=0 到 pp}
+    J --> K[坐标变换: q,p → x,y]
+    K --> L{边界检查}
+    
+    L -->|越界| J
+    L -->|合法| M[计算角度: a0=q/p, a1=a0-dq2, a2=a0+dq2]
+    
+    M --> N{三点采样}
+    N -->|全阻挡| O[跳过不设置可见]
+    N -->|部分可见| P["fieldOfView[pos] = true"]
+    
+    O --> Q{losBlocking<pos>?}
+    P --> Q
+    
+    Q -->|是障碍物| R["obs.add(a1, a2)"]
+    Q -->|非障碍物| S[继续]
+    R --> S
+    
+    S --> J
+    J -->|q 循环结束| T[obs.nextRow]
+    T --> G
+    
+    G -->|p 循环结束| U[扇形扫描完成]
+    U --> D
+    
+    D -->|8 个扇形完成| V[castShadow 结束]
+    
+    style A fill:#e1f5e1
+    style V fill:#ffe1e1
+    style P fill:#fff4e1
+    style R fill:#e1e5ff
+```
+
+### 1.6 算法复杂度分析
+
+#### 1.6.1 时间复杂度
+
+**最坏情况 (无障碍物):**
+
+```
+单个扇形扫描的单元格数:
+Σ(p=1 to 8) limits[p]
+
+使用预计算表:
+limits[1] = 1
+limits[2] = 2
+limits[3] = 3
+...
+limits[8] = 8
+
+总数 = 1+2+3+...+8 = 36 个单元格
+
+8 个扇形 × 36 = 288 个单元格
+每个单元格: O(n) 障碍物检测，n = 已累积的障碍物数量
+
+总时间复杂度: O(d² × n_obs)
+- d = MAX_DISTANCE
+- n_obs = 平均障碍物数量
+```
+
+**最好情况 (完全阻挡):**
+
+```
+如果第 1 行就完全阻挡视野:
+- 只扫描 1 行
+- 时间复杂度: O(1)
+```
+
+**实际复杂度:**
+
+```
+Pixel Dungeon 典型场景:
+- d = 8
+- n_obs ≈ 5-10 (平均每个扇形)
+- 总计算量 ≈ 64 × 7.5 = 480 次比较
+
+约 500-1000 次浮点数比较 (可接受)
+```
+
+#### 1.6.2 空间复杂度
+
+```
+静态数据:
+- rounding[][] ≈ 9 × 5 × 4 bytes = 180 bytes
+- Obstacles.a1/a2 = 41 × 2 × 4 bytes = 328 bytes
+
+动态数据:
+- fieldOfView[] = 1024 × 1 byte = 1 KB
+- losBlocking[] = 1024 × 1 byte = 1 KB
+
+总计 ≈ 2.5 KB (非常轻量)
+```
+
+### 1.7 算法优势与局限
+
+#### 1.7.1 优势
+
+1. **精确性**
+   - 三点采样确保部分可见的单元格不会被遗漏
+   - 障碍物合并减少冗余检测
+
+2. **对称性**
+   - 8 个八分圆完美覆盖 360°
+   - 坐标变换确保各方向一致性
+
+3. **性能**
+   - 预计算表避免实时三角函数计算
+   - 逐行合并减少障碍物数量
+
+4. **可调节**
+   - 可轻松修改 MAX_DISTANCE
+   - 支持不同视野范围的角色
+
+#### 1.7.2 局限
+
+1. **固定圆形**
+   - 只支持圆形视野，不支持椭圆/矩形
+
+2. **整数网格**
+   - 无法处理亚像素精度
+
+3. **同步计算**
+   - 无法并行化 (障碍物累积有顺序依赖)
+
+4. **内存访问模式**
+   - 随机访问 `losBlocking[]` 可能导致缓存未命中
+
+### 1.8 实战应用示例
+
+#### 1.8.1 完整视野计算示例
+
+**场景设置:**
+
+```
+地图 (5×5):
+  0 1 2 3 4
+0 . . . . .
+1 . @ . # .
+2 . . . . .
+3 . # . . .
+4 . . . . .
+
+@ = 观察者 (1, 1)
+# = 障碍物 (3, 1) 和 (1, 3)
+. = 空地
+```
+
+**扫描第 1 八分圆 (右上，0°-45°):**
+
+```
+p=1, q=0: (2, 2) → 可见, 非障碍物
+p=1, q=1: (2, 2) → 可见, 非障碍物
+
+p=2, q=0: (3, 3) → 可见, 非障碍物
+p=2, q=1: (3, 3) → 可见, 非障碍物
+p=2, q=2: (3, 3) → 可见, 非障碍物
+
+obs.nextRow() → 无障碍物生效
+
+p=3, q=0: (4, 4) → 可见
+```
+
+**扫描第 2 八分圆 (右上，45°-90°):**
+
+```
+p=1, q=0: (1, 2) → 可见
+p=1, q=1: (2, 2) → 可见
+
+p=2, q=0: (1, 3) → 可见, **障碍物** → obs.add(a1=−0.25, a2=0.25)
+p=2, q=1: (2, 3) → 检查 a0=0.5, a1=0.25, a2=0.75
+           isBlocked(0.5)=false → 可见
+p=2, q=2: (3, 3) → 可见
+
+obs.nextRow() → limit=1, 障碍物 [−0.25, 0.25] 生效
+
+p=3, q=0: (1, 4) → 检查 a0=0, a1=−0.167, a2=0.167
+           isBlocked(0)=true → 被阻挡
+p=3, q=1: (2, 4) → a0=0.33, 部分被阻挡但边界可见 → 可见
+```
+
+**最终结果:**
+
+```
+  0 1 2 3 4
+0 . ■ ■ ■ .
+1 ■ @ ■ # ■
+2 ■ ■ ■ ■ ■
+3 ■ X ■ ■ ■
+4 . X ■ ■ ■
+
+■ = 可见
+X = 被阻挡 (障碍物 @ (1,3) 的阴影)
+. = 不可见 (超出视距)
 ```
 
 ## 2. Level 视野更新
